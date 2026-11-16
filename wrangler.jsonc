@@ -11,7 +11,7 @@
   // resource identifier, so it must match what clients actually connect to.
   // Override per environment in .dev.vars; set the real value here before deploying.
   "vars": {
-    "PUBLIC_URL": "https://workers.dev"
+    "PUBLIC_URL": "https://kt-mcp.luborozhon.workers.dev"
   },
   // Secrets (set with `wrangler secret put`): KT_EMAIL, KT_PASSWORD, MCP_AUTH_PASSWORD
   "secrets": {
