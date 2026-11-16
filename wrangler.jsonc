@@ -1,0 +1,60 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kt-mcp",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  // The public HTTPS origin of this Worker — your workers.dev URL or a custom
+  // domain, no path, no trailing slash. It is the OAuth issuer and the RFC 8707
+  // resource identifier, so it must match what clients actually connect to.
+  // Override per environment in .dev.vars; set the real value here before deploying.
+  "vars": {
+    "PUBLIC_URL": "https://workers.dev"
+  },
+  // Secrets (set with `wrangler secret put`): KT_EMAIL, KT_PASSWORD, MCP_AUTH_PASSWORD
+  "secrets": {
+    "required": [
+      "KT_EMAIL",
+      "KT_PASSWORD",
+      "MCP_AUTH_PASSWORD"
+    ]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MCP_OBJECT",
+        "class_name": "KtMCP"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "KtMCP"
+      ]
+    }
+  ],
+  // OAuth clients, grants and tokens. Created automatically on first deploy.
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV"
+    }
+  ],
+  // Brute-force guard for the consent password: 10 attempts / minute / IP.
+  "ratelimits": [
+    {
+      "name": "AUTH_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 10,
+        "period": 60
+      }
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

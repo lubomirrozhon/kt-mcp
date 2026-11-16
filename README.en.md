@@ -86,8 +86,7 @@ Two credentials, doing different jobs:
 You never create or copy a token by hand — OAuth does it for you:
 
 1. You put your **kaloricketabulky.cz login** (`KT_EMAIL` / `KT_PASSWORD`) and a
-   **passphrase you invent** (`MCP_AUTH_PASSWORD`) into the server's environment
-   (`.env`). The kaloricketabulky.cz credentials stay on your server; the agent
+   **passphrase you invent** (`MCP_AUTH_PASSWORD`) into the Worker's secrets. The kaloricketabulky.cz credentials stay on your server; the agent
    never sees them.
 2. In your agent you add the connector URL, `https://<your-host>/mcp`. The agent
    registers itself with your server automatically (dynamic client registration).
@@ -106,139 +105,100 @@ service.
 
 ```bash
 npm install
-cp .env.example .env      # fill in your credentials
-npm run build
+cp .dev.vars.example .dev.vars   # fill in your credentials
 npm test
-
-set -a; source .env; set +a
-PUBLIC_URL=https://localhost:8092 node dist/index.js
+npm run dev                      # http://localhost:8787
 ```
 
-`GET /healthz` returns the resolved public MCP endpoint, which is the quickest way to confirm `PUBLIC_URL` is what you think it is.
+`GET /healthz` returns the resulting public MCP endpoint — the quickest way to check that `PUBLIC_URL` is really what you think it is. Wrangler needs Node 22.12+.
 
-## Self-hosting
+## Self-hosting (Cloudflare Workers)
 
-> ⚠️ The server should run around the clock — on a PC that sleeps, scheduled
-> logging fails. Details and recommendations in [HOSTING.md](HOSTING.md).
+kt-mcp runs as a Cloudflare Worker on the free plan — no server to keep alive, no tunnel, no open ports. It is built from three pieces:
 
-The reference deployment uses Docker, nginx, and a free Cloudflare Tunnel — no inbound port is opened on your host or router. Any other way of putting an HTTPS hostname in front of the container works too; the tunnel is just the cheapest safe default.
+- [`agents`](https://github.com/cloudflare/agents) `McpAgent` — the MCP server, one Durable Object per session (`src/mcp/agent.ts`)
+- [`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider) — the OAuth 2.1 authorization server; clients, grants and tokens live in KV (`src/worker.ts`)
+- a small consent page guarded by your passphrase (`src/auth/consent.ts`)
 
-Request path:
+**1. Set the public URL.** In `wrangler.jsonc`, set `vars.PUBLIC_URL` to the origin the Worker will be served from — `https://kt-mcp.<your-subdomain>.workers.dev`, or a custom domain you attach to it. No path, no trailing slash.
 
-```
-Cloudflare → cloudflared (host network) → 127.0.0.1:80 → nginx → kt-mcp:8092
-```
-
-nginx publishes on the host loopback only and `cloudflared` dials out. The nginx config
-(`deploy/nginx.conf.template`) disables proxy buffering, without which Server-Sent
-Events would be held until the stream closed and tool calls would stall.
-
-**1. Create the tunnel** (once), in the Cloudflare Zero Trust dashboard → Networks → Tunnels:
-
-- Create a tunnel, copy the **tunnel token**.
-- Add a public hostname with service **`HTTP`** → **`localhost:80`**. The
-  stack's `cloudflared` runs in host network mode, so `localhost:80` is the
-  nginx published on the host loopback. Plain `http`, because the tunnel
-  terminates TLS.
-
-The hostname you choose is referred to below as `<your-host>`; any domain on
-your Cloudflare account works, and nothing in the code is tied to it.
-
-**2. Build the image**, from this directory:
+**2. Deploy.**
 
 ```bash
-docker compose build
+npm install
+npx wrangler deploy
 ```
 
-**3. Deploy the stack.** `deploy/stack.yml` is the runtime compose file (works standalone or as a Portainer stack); set these environment variables:
+The KV namespace and the Durable Object are created on first deploy.
 
-| Variable | Value |
+**3. Set the secrets.**
+
+| Secret | Value |
 |---|---|
 | `KT_EMAIL` / `KT_PASSWORD` | Your kaloricketabulky.cz login |
-| `MCP_HOSTNAME` | `<your-host>` — the bare hostname, no scheme. nginx renders it into its config at start-up |
-| `MCP_AUTH_PASSWORD` | A long passphrase you choose (min 12 chars) |
-| `PUBLIC_URL` | `https://<your-host>` — must match the tunnel hostname exactly |
-| `TUNNEL_TOKEN` | From step 1 |
+| `MCP_AUTH_PASSWORD` | A long passphrase you choose (min. 12 characters) |
 
-Keep `docker-compose.yml` and `deploy/stack.yml` in sync — the first builds the image, the second runs it.
+```bash
+npx wrangler secret put KT_EMAIL
+npx wrangler secret put KT_PASSWORD
+npx wrangler secret put MCP_AUTH_PASSWORD
+```
 
-**4. Check the deployment** before wiring it into an agent:
+**4. Verify the deployment** before connecting an agent:
 
 ```bash
 ./scripts/verify-deployment.sh https://<your-host>
 ```
 
-**5. Connect your agent.** In Claude: Settings → Connectors → Add custom connector → enter `https://<your-host>/mcp`. The agent registers itself, opens the consent page, and you enter `MCP_AUTH_PASSWORD` once. Other MCP clients follow their own "add remote MCP server" flow with the same URL.
+**5. Connect your agent.** In Claude: Settings → Connectors → Add custom connector → enter `https://<your-host>/mcp`. The agent registers itself, opens the consent page, and you type `MCP_AUTH_PASSWORD` once. Other MCP clients have their own "add remote MCP server" flow with the same URL.
 
 ### Changing the domain later
 
-The hostname is not baked into the image — only `PUBLIC_URL` and the tunnel's
-public hostname need to agree. To move:
+`PUBLIC_URL` is the OAuth issuer and the RFC 8707 resource identifier, so tokens issued under the old hostname are correctly rejected after a move. Change `vars.PUBLIC_URL`, redeploy, re-run the verify script, then remove and re-add the connector in your agent.
 
-1. Point the tunnel's public hostname at the new domain (or create a new tunnel
-   and swap `TUNNEL_TOKEN`).
-2. Update `PUBLIC_URL` on the stack and redeploy.
-3. Re-run the verification script, then remove and re-add the connector in
-   your agent.
+### Stuck?
 
-Step 3 is required: `PUBLIC_URL` is the OAuth issuer and the RFC 8707 resource
-identifier, so tokens issued under the old hostname are correctly rejected
-after the move.
-
-### Stuck, or nowhere to run it?
-
-If you hit a wall self-hosting, open a [GitHub issue](../../issues) — happy to
-help you get unstuck, that's what the issue tracker is for.
-
-Self-hosting does need a machine that is always on (see
-[HOSTING.md](HOSTING.md)) and a Cloudflare account. If you have no way to run
-it at all, you can reach me at **kt-mcp@stanwhy.me** and we can figure
-something out — just know that running a private instance means real server
-costs, which would be yours to cover.
+If you hit a wall self-hosting, open a [GitHub issue](../../issues) — happy to help you get unstuck.
 
 ## Authentication
 
-The server is its own OAuth 2.1 authorization server, implementing what the MCP spec requires of a protected resource:
+The Worker is its own OAuth 2.1 authorization server (via `@cloudflare/workers-oauth-provider`), implementing what the MCP spec requires of a protected resource:
 
 - `/.well-known/oauth-protected-resource/mcp` — RFC 9728 discovery
 - `/.well-known/oauth-authorization-server` — RFC 8414 discovery
-- `/authorize`, `/token`, `/register`, `/revoke` — authorization code + PKCE, dynamic client registration, refresh-token rotation
+- `/authorize`, `/token`, `/register` — authorization code + PKCE, dynamic client registration, refresh-token rotation
 
-Access tokens live 30 days and are persisted to `/data` on a volume, so redeploying does not force you to reconnect.
+Access tokens live 30 days and are stored in KV, so redeploying does not force you to reconnect.
 
 ### What the passphrase protects
 
 `MCP_AUTH_PASSWORD` is the only way to obtain a token. Every request to `/mcp`
 requires a valid bearer token, and tokens are minted solely by the consent form
-after a constant-time comparison against that passphrase. Verified by audit
-(`scripts/security-audit.sh`): unauthenticated and forged-token calls are
-rejected, fabricated authorization codes and refresh tokens are rejected, no
-public endpoint exposes a credential, and no verb or path variation reaches the
-tools without a token.
+after a constant-time comparison against that passphrase. The form is bound to
+the browser that loaded it by a cookie, so a cross-site POST cannot approve a
+request. `scripts/security-audit.sh` probes this from outside: unauthenticated
+and forged-token calls are rejected, fabricated authorization codes and refresh
+tokens are rejected, and no public endpoint exposes a credential.
 
 Two things are public by design and safe to be so: OAuth discovery documents
 (the spec requires them) and dynamic client registration. Registering a client
 gets an attacker no further — they still cannot obtain a token without the
 passphrase.
 
-Brute force is bounded by a 100-requests-per-15-minutes limit on `/authorize`.
-That limiter keys on client IP, so nginx **overwrites** `X-Forwarded-For` with
-Cloudflare's verified `CF-Connecting-IP` and the app trusts exactly one proxy
-hop. Appending to a caller-supplied header instead — or setting
-`trust proxy: true` — lets an attacker forge a fresh bucket per request and
-removes the limit entirely.
+Brute force is bounded by a Workers rate-limit binding (`AUTH_LIMITER` in
+`wrangler.jsonc`): 10 password attempts per minute per client IP, counted on every attempt.
 
 Residual risks worth knowing: anyone holding the passphrase has full access;
-tokens cannot be revoked individually short of deleting `/data/oauth-state.json`;
-and because client registration is open, a phishing link to the consent page
-could capture the passphrase if you typed it there — check the client name shown
+grants can be revoked by deleting the KV namespace's entries; and because client
+registration is open, a phishing link to the consent page could capture the
+passphrase if you typed it there — check the client name and redirect host shown
 on the form before authorizing.
 
 ## Caveats
 
 - **Undocumented upstream.** Dine4Fit guarantees nothing here; a frontend refactor could change payload shapes without warning. The client throws on anything unexpected rather than guessing, so breakage surfaces as a loud error rather than a wrong calorie count.
 - **`md5(password)` is password-equivalent.** The site hashes the password client-side, so the hash is as sensitive as the password. Treat `KT_PASSWORD` accordingly.
-- **One account per instance.** The server logs into a single kaloricketabulky.cz account. Two people, two containers.
+- **One account per instance.** The server logs into a single kaloricketabulky.cz account. Two people, two Worker deployments.
 - **Personal use.** Automating entry into your own account is a far softer position than bulk scraping, but it is still outside anything Dine4Fit has sanctioned. Keep the request rate human, and don't build a competing client on it.
 - **Reading a day's individual entries** is the least-verified endpoint; `get_day_summary` passes the site's response through unmodified because its shape isn't fully documented.
 - **Partial portions of a recipe cannot be logged.** The meal-add form offers a `count` against portion, percent and gram pseudo-units, but the server ignores it and logs the whole recipe regardless — measured against a 249 kcal recipe, both 0.5 portions and half the total weight added the full 249. `log_meal` therefore takes no `portions` argument; log the ingredients individually with `log_food` when only part of a recipe was eaten.

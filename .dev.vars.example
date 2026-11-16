@@ -1,0 +1,7 @@
+# Copy to .dev.vars for `npm run dev`. Never commit .dev.vars.
+KT_EMAIL="you@example.com"
+KT_PASSWORD="your-kaloricketabulky-password"
+# Typed on the consent page when connecting an agent. Make it long (min. 12 chars).
+MCP_AUTH_PASSWORD="change-me-to-a-long-random-passphrase"
+# Local dev only; for deploys set vars.PUBLIC_URL in wrangler.jsonc.
+PUBLIC_URL="http://localhost:8787"

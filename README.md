@@ -84,7 +84,7 @@ Dvě hesla, každé hlídá něco jiného:
 
 Žádný token ručně nevytváříte ani nekopírujete — OAuth to udělá za vás:
 
-1. Do prostředí serveru (`.env`) vložíte svůj **login na kaloricketabulky.cz**
+1. Do secretů Workeru vložíte svůj **login na kaloricketabulky.cz**
    (`KT_EMAIL` / `KT_PASSWORD`) a **přístupovou frázi, kterou si vymyslíte**
    (`MCP_AUTH_PASSWORD`). Přihlašovací údaje ke kalorickým tabulkám zůstávají
    na vašem serveru; agent je nikdy nevidí.
@@ -104,62 +104,44 @@ Mezi instalacemi se nesdílí nic a žádná centrální služba neexistuje.
 
 ```bash
 npm install
-cp .env.example .env      # doplňte své údaje
-npm run build
+cp .dev.vars.example .dev.vars   # doplňte své údaje
 npm test
-
-set -a; source .env; set +a
-PUBLIC_URL=https://localhost:8092 node dist/index.js
+npm run dev                      # http://localhost:8787
 ```
 
-`GET /healthz` vrací výsledný veřejný MCP endpoint — nejrychlejší způsob, jak ověřit, že `PUBLIC_URL` je opravdu to, co si myslíte.
+`GET /healthz` vrací výsledný veřejný MCP endpoint — nejrychlejší způsob, jak ověřit, že `PUBLIC_URL` je opravdu to, co si myslíte. Wrangler vyžaduje Node 22.12+.
 
-## Vlastní hosting
+## Vlastní hosting (Cloudflare Workers)
 
-> ⚠️ Server by měl běžet nepřetržitě — na uspávaném PC selžou naplánované
-> zápisy. Podrobnosti a doporučení v [HOSTING.md](HOSTING.md).
+kt-mcp běží jako Cloudflare Worker na free plánu — žádný server, který by musel běžet, žádný tunel, žádné otevřené porty. Skládá se ze tří částí:
 
-Referenční nasazení používá Docker, nginx a Cloudflare Tunnel zdarma — na hostiteli ani routeru se neotvírá žádný příchozí port. Funguje ale cokoli jiného, co před kontejner postaví HTTPS hostname; tunel je jen nejlevnější bezpečná výchozí volba.
+- [`agents`](https://github.com/cloudflare/agents) `McpAgent` — MCP server, jeden Durable Object na session (`src/mcp/agent.ts`)
+- [`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider) — OAuth 2.1 autorizační server; klienti, granty a tokeny jsou v KV (`src/worker.ts`)
+- malá stránka souhlasu chráněná vaší frází (`src/auth/consent.ts`)
 
-Cesta požadavku:
+**1. Nastavte veřejnou URL.** V `wrangler.jsonc` nastavte `vars.PUBLIC_URL` na origin, na kterém Worker poběží — `https://kt-mcp.<vaše-subdomena>.workers.dev` nebo vlastní doména. Bez cesty a bez koncového lomítka.
 
-```
-Cloudflare → cloudflared (host network) → 127.0.0.1:80 → nginx → kt-mcp:8092
-```
-
-nginx poslouchá jen na loopbacku hostitele a `cloudflared` se připojuje ven.
-Konfigurace nginx (`deploy/nginx.conf.template`) vypíná proxy buffering — bez
-toho by Server-Sent Events čekaly na konec streamu a volání nástrojů by se
-zasekávala.
-
-**1. Vytvořte tunel** (jednou), v Cloudflare Zero Trust dashboardu → Networks → Tunnels:
-
-- Vytvořte tunel, zkopírujte **tunnel token**.
-- Přidejte public hostname se službou **`HTTP`** → **`localhost:80`**.
-  `cloudflared` ze stacku běží v host network módu, takže `localhost:80` je
-  nginx publikovaný na loopbacku hostitele. Obyčejné `http`, protože TLS
-  ukončuje tunel.
-
-Zvolený hostname je dále označován `<your-host>`; funguje jakákoli doména na
-vašem Cloudflare účtu a nic v kódu na ni není vázané.
-
-**2. Sestavte image**, z tohoto adresáře:
+**2. Nasaďte.**
 
 ```bash
-docker compose build
+npm install
+npx wrangler deploy
 ```
 
-**3. Nasaďte stack.** `deploy/stack.yml` je runtime compose soubor (funguje samostatně i jako Portainer stack); nastavte tyto proměnné prostředí:
+KV namespace i Durable Object se vytvoří při prvním nasazení.
 
-| Proměnná | Hodnota |
+**3. Nastavte secrety.**
+
+| Secret | Hodnota |
 |---|---|
 | `KT_EMAIL` / `KT_PASSWORD` | Váš login na kaloricketabulky.cz |
-| `MCP_HOSTNAME` | `<your-host>` — holý hostname bez schématu. nginx si ho při startu doplní do konfigurace |
 | `MCP_AUTH_PASSWORD` | Dlouhá přístupová fráze, kterou si zvolíte (min. 12 znaků) |
-| `PUBLIC_URL` | `https://<your-host>` — musí přesně odpovídat hostname tunelu |
-| `TUNNEL_TOKEN` | Z kroku 1 |
 
-Udržujte `docker-compose.yml` a `deploy/stack.yml` v souladu — první sestavuje image, druhý ho spouští.
+```bash
+npx wrangler secret put KT_EMAIL
+npx wrangler secret put KT_PASSWORD
+npx wrangler secret put MCP_AUTH_PASSWORD
+```
 
 **4. Ověřte nasazení**, než ho připojíte k agentovi:
 
@@ -171,71 +153,50 @@ Udržujte `docker-compose.yml` a `deploy/stack.yml` v souladu — první sestavu
 
 ### Pozdější změna domény
 
-Hostname není zapečený v image — shodovat se musí jen `PUBLIC_URL` a public
-hostname tunelu. Přesun:
+`PUBLIC_URL` je OAuth issuer a identifikátor zdroje podle RFC 8707, takže tokeny vydané pod starým hostname jsou po přesunu správně odmítnuty. Změňte `vars.PUBLIC_URL`, znovu nasaďte, spusťte ověřovací skript a v agentovi konektor odeberte a přidejte znovu.
 
-1. Přesměrujte public hostname tunelu na novou doménu (nebo vytvořte nový tunel
-   a vyměňte `TUNNEL_TOKEN`).
-2. Aktualizujte `PUBLIC_URL` na stacku a znovu nasaďte.
-3. Znovu spusťte ověřovací skript, pak v agentovi konektor odeberte a přidejte
-   znovu.
+### Zaseklí?
 
-Krok 3 je nutný: `PUBLIC_URL` je OAuth issuer a identifikátor zdroje podle
-RFC 8707, takže tokeny vydané pod starým hostname jsou po přesunu správně
-odmítnuty.
-
-### Zaseklí, nebo nemáte kde hostovat?
-
-Pokud při vlastním hostování narazíte, založte [GitHub issue](../../issues) —
-rád pomůžu, od toho issue tracker je.
-
-Vlastní hosting potřebuje stroj, který běží nepřetržitě (viz
-[HOSTING.md](HOSTING.md)), a účet u Cloudflare. Pokud nemáte kde server
-provozovat, ozvěte se na **kt-mcp@stanwhy.me** a něco vymyslíme — jen počítejte
-s tím, že provoz privátní instance znamená reálné náklady na server, které by
-šly za vámi.
+Pokud při vlastním hostování narazíte, založte [GitHub issue](../../issues) — rád pomůžu.
 
 ## Autentizace
 
-Server je sám sobě OAuth 2.1 autorizačním serverem a implementuje, co MCP specifikace od chráněného zdroje vyžaduje:
+Worker je sám sobě OAuth 2.1 autorizačním serverem (přes `@cloudflare/workers-oauth-provider`) a implementuje, co MCP specifikace od chráněného zdroje vyžaduje:
 
 - `/.well-known/oauth-protected-resource/mcp` — RFC 9728 discovery
 - `/.well-known/oauth-authorization-server` — RFC 8414 discovery
-- `/authorize`, `/token`, `/register`, `/revoke` — authorization code + PKCE, dynamická registrace klientů, rotace refresh tokenů
+- `/authorize`, `/token`, `/register` — authorization code + PKCE, dynamická registrace klientů, rotace refresh tokenů
 
-Přístupové tokeny žijí 30 dní a persistují se do `/data` na volume, takže redeploy nevynutí nové připojení konektoru.
+Přístupové tokeny žijí 30 dní a jsou uložené v KV, takže redeploy nevynutí nové připojení konektoru.
 
 ### Co chrání přístupová fráze
 
 `MCP_AUTH_PASSWORD` je jediná cesta k získání tokenu. Každý požadavek na `/mcp`
 vyžaduje platný bearer token a tokeny vydává výhradně formulář souhlasu po
-porovnání s frází v konstantním čase. Ověřeno auditem
-(`scripts/security-audit.sh`): neautentizovaná volání i volání s padělaným
-tokenem jsou odmítnuta, vymyšlené autorizační kódy a refresh tokeny jsou
-odmítnuty, žádný veřejný endpoint nevydává credential a žádná variace metody či
-cesty se k nástrojům bez tokenu nedostane.
+porovnání s frází v konstantním čase. Formulář je cookie navázaný na prohlížeč,
+který ho načetl, takže cross-site POST žádost schválit nemůže.
+`scripts/security-audit.sh` to testuje zvenčí: neautentizovaná volání i volání
+s padělaným tokenem jsou odmítnuta, vymyšlené autorizační kódy a refresh tokeny
+jsou odmítnuty a žádný veřejný endpoint nevydává credential.
 
 Dvě věci jsou veřejné záměrně a bezpečně: OAuth discovery dokumenty (vyžaduje je
 specifikace) a dynamická registrace klientů. Registrace klienta útočníkovi nic
 nedá — token bez fráze stále nezíská.
 
-Hrubou sílu omezuje limit 100 požadavků za 15 minut na `/authorize`. Limiter
-klíčuje podle IP klienta, proto nginx **přepisuje** `X-Forwarded-For` ověřenou
-hlavičkou `CF-Connecting-IP` od Cloudflare a aplikace věří přesně jednomu proxy
-hopu. Připojování k hlavičce od klienta — nebo `trust proxy: true` — by útočníkovi
-dovolilo vyrobit si nový bucket pro každý požadavek a limit by přestal existovat.
+Hrubou sílu omezuje rate-limit binding Workers (`AUTH_LIMITER` v
+`wrangler.jsonc`): 10 pokusů o heslo za minutu na IP klienta, počítaných při každém pokusu.
 
 Zbytková rizika, o kterých je dobré vědět: kdokoli s frází má plný přístup;
-jednotlivé tokeny nelze odvolat jinak než smazáním `/data/oauth-state.json`;
-a protože registrace klientů je otevřená, phishingový odkaz na stránku souhlasu
-by mohl frázi zachytit, kdybyste ji tam zadali — před autorizací zkontrolujte
-jméno klienta zobrazené ve formuláři.
+granty lze odvolat smazáním záznamů v KV namespace; a protože registrace klientů
+je otevřená, phishingový odkaz na stránku souhlasu by mohl frázi zachytit,
+kdybyste ji tam zadali — před autorizací zkontrolujte jméno klienta a host
+přesměrování zobrazené ve formuláři.
 
 ## Omezení
 
 - **Nedokumentovaný upstream.** Dine4Fit tu nic negarantuje; refactoring frontendu může bez varování změnit tvary odpovědí. Klient při čemkoli nečekaném vyhodí chybu místo hádání, takže se rozbití projeví hlasitou chybou, ne špatným počtem kalorií.
 - **`md5(hesla)` je ekvivalent hesla.** Web hashuje heslo na klientovi, hash je tedy stejně citlivý jako heslo samotné. Podle toho s `KT_PASSWORD` zacházejte.
-- **Jeden účet na instanci.** Server se přihlašuje k jedinému účtu kaloricketabulky.cz. Dva lidé, dva kontejnery.
+- **Jeden účet na instanci.** Server se přihlašuje k jedinému účtu kaloricketabulky.cz. Dva lidé, dvě nasazení Workeru.
 - **Osobní použití.** Automatizace zápisů do vlastního účtu je mnohem měkčí pozice než hromadný scraping, ale pořád je mimo cokoli, co Dine4Fit posvětil. Držte frekvenci požadavků na lidské úrovni a nestavte na tom konkurenčního klienta.
 - **Čtení jednotlivých záznamů dne** je nejméně ověřený endpoint; `get_day_summary` posílá odpověď webu beze změny dál, protože její tvar není plně zdokumentovaný.
 - **Část porce receptu zalogovat nejde.** Formulář pro přidání jídla sice nabízí `count` proti pseudo-jednotkám porce, procenta a gramy, ale server ho ignoruje a zaloguje vždy celý recept — měřeno na receptu o 249 kcal přidalo 0,5 porce i polovina váhy plných 249. `log_meal` proto nemá argument `portions`; když snědená byla jen část receptu, zalogujte suroviny jednotlivě přes `log_food`.
